@@ -29,15 +29,18 @@ def CalibrateCamera(nx,ny):
         if ret == True:
             objpoints.append(objp)
             imgpoints.append(corners)
-    return objpoints,imgpoints
+    img_size = (img.shape[1], img.shape[0])
+    # Do camera calibration given object points and image points
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img_size,None,None)
+    dst = cv2.undistort(img, mtx, dist, None, mtx)
+    return objpoints,imgpoints, mtx, dist
 """
 Undistortion for the image. 
 This function return the image after removing the distortion.
 """
-def undistortimage(img,objpoints, imgpoints,nx,ny):
+def undistortimage(img,objpoints, imgpoints,nx,ny, mtx, dist):
     img_size = (img.shape[1], img.shape[0])
-    # Do camera calibration given object points and image points
-    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img_size,None,None)
+  
     dst = cv2.undistort(img, mtx, dist, None, mtx)
     #cv2.imwrite("output_images/undistimages/test5_undist.jpg",dst)
     ## Save the camera calibration result for later use (we won't worry about
@@ -117,33 +120,33 @@ def hls_select(img, thresh=(0, 255)):
     #plt.imshow(binary_output,cmap='gray')
     #plt.show()
     return binary_output
-def lab_bthresh(img, thresh=(190,255)):
-    # 1) Convert to LAB color space
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
-    lab_b = lab[:,:,2]
-    # don't normalize if there are no yellows in the image
-    if np.max(lab_b) > 175:
-        lab_b = lab_b*(255/np.max(lab_b))
-    # 2) Apply a threshold to the L channel
-    binary_output = np.zeros_like(lab_b)
-    binary_output[((lab_b > thresh[0]) & (lab_b <= thresh[1]))] = 1
+def RGB_thresh(img, thresh=(25,255)):
+    min=thresh[0]
+    max=thresh[1]
+    R=img[:,:,2]
+    G=img[:,:,1]
+    B=img[:,:,0]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    binary_output = np.zeros_like(gray)
+    binary_output[((( R> min) & (R<max))&(( G> min) & (G<max))&(( B> min) & (B<max)))] = 1
     # 3) Return a binary image of threshold result
     return binary_output
 def CombinedImage(img):
     ksize = 5
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     img_s=hls_select(img,thresh=(200, 255))
-    img_b = lab_bthresh(img)
+    img_RGb = RGB_thresh(img)
     gradx = abs_sobel_thresh(gray, orient='x', sobel_kernel=ksize, thresh=(20, 100))
     grady = abs_sobel_thresh(gray, orient='y', sobel_kernel=ksize, thresh=(20, 100))
     mag_binary = mag_thresh(gray, sobel_kernel=ksize, mag_thresh=(20, 100))
-    dir_binary = dir_threshold(gray, sobel_kernel=ksize, thresh=(0.7, 1))
+    dir_binary = dir_threshold(gray, sobel_kernel=ksize, thresh=(0.1, 1))
     combined=np.zeros_like(gray)
     combined_f=np.zeros_like(gray)
     combined_c=np.zeros_like(gray)
     combined_f[(((gradx==1)&(grady==1))|((mag_binary==1)&(dir_binary==1)))]=1
-    combined_c[(((img_s==1)|(img_b==1)))]=1
-    combined[(((img_s==1)|(img_b==1))|(combined_f==1))]=1
+    #combined_c[(((img_s==1)|(img_b==1)))]=1
+    combined_c[((img_s==1))]=1
+    combined[(((img_s==1)|(combined_f==1))&(img_RGb==1))]=1
 
     #return combined_c,combined_f,combined
     return combined
@@ -233,7 +236,7 @@ def SlidingWindow(binary_warped):
 def CalcCurvature(binary_warped,left_fit,right_fit,left_lane_inds,right_lane_inds):
 
     ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
-
+    center_dist=0
     nonzero = binary_warped.nonzero()
     nonzeroy = np.array(nonzero[0])
     nonzerox = np.array(nonzero[1])
@@ -250,17 +253,24 @@ def CalcCurvature(binary_warped,left_fit,right_fit,left_lane_inds,right_lane_ind
     #right_curverad = ((1 + (2*right_fit[0]*y_eval + right_fit[1])**2)**1.5) / np.absolute(2*right_fit[0])
     #print(left_curverad, right_curverad)
     # Define conversions in x and y from pixels space to meters
-    ym_per_pix = 30/720 # meters per pixel in y dimension
-    xm_per_pix = 3.7/700 # meters per pixel in x dimension
+    ym_per_pix = 3.048/100 # meters per pixel in y dimension
+    xm_per_pix = 3.7/400 # meters per pixel in x dimension
     # Fit new polynomials to x,y in world space
     left_fit_cr = np.polyfit(lefty*ym_per_pix, leftx*xm_per_pix, 2)
     right_fit_cr = np.polyfit(righty*ym_per_pix, rightx*xm_per_pix, 2)
     # Calculate the new radii of curvature
     left_curverad = ((1 + (2*left_fit_cr[0]*y_eval*ym_per_pix + left_fit_cr[1])**2)**1.5) / np.absolute(2*left_fit_cr[0])
     right_curverad = ((1 + (2*right_fit_cr[0]*y_eval*ym_per_pix + right_fit_cr[1])**2)**1.5) / np.absolute(2*right_fit_cr[0])
+    if right_fit is not None and left_fit is not None:
+        h = binary_warped.shape[0]
+        car_position = binary_warped.shape[1]/2
+        l_fit_x_int = left_fit[0]*h**2 + left_fit[1]*h + left_fit[2]
+        r_fit_x_int = right_fit[0]*h**2 + right_fit[1]*h + right_fit[2]
+        lane_center_position = (r_fit_x_int + l_fit_x_int) /2
+        center_dist = (car_position - lane_center_position) * xm_per_pix
     # Now our radius of curvature is in meters
     print(left_curverad, 'm', right_curverad, 'm')
-    return left_curverad,right_curverad
+    return left_curverad,right_curverad,center_dist
 def DrawLaneArea(image,undst,warped,left_fit,right_fit,Minv):
     ploty = np.linspace(0, warped.shape[0]-1, warped.shape[0] )
     # Create an image to draw the lines on
@@ -361,5 +371,17 @@ def VisualizeLane(binary_warped,out_img,left_fit,right_fit,left_lane_inds,right_
     plt.plot(right_fitx, ploty, color='yellow')
     plt.xlim(0, 1280)
     plt.ylim(720, 0)
+    plt.show()
+    return
+def UndistortedChessBoardTest():
+    img = cv2.imread('camera_cal/calibration1.jpg')
+    img_size = (img.shape[1], img.shape[0])
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img_size,None,None)
+    dst = cv2.undistort(img, mtx, dist, None, mtx)
+    f, (ax1, ax2) = plt.subplots(1, 2, figsize=(20,10))
+    ax1.imshow(img)
+    ax1.set_title('Original', fontsize=30)
+    ax2.imshow(dst)
+    ax2.set_title('Undistorted', fontsize=30)
     plt.show()
     return
